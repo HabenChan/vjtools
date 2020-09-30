@@ -146,10 +146,13 @@ public class DateUtil {
 	}
 
 	/**
-	 * 设置月份, 0-11.
+	 * 设置月份, 1-12.
 	 */
 	public static Date setMonths(@NotNull final Date date, int amount) {
-		return DateUtils.setMonths(date, amount);
+		if (amount < 1 || amount > 12) {
+			throw new IllegalArgumentException("monthOfYear must be in the range[ 1, 12]");
+		}
+		return DateUtils.setMonths(date, amount - 1);
 	}
 
 	/**
@@ -189,7 +192,7 @@ public class DateUtil {
 
 	///// 获取日期的位置//////
 	/**
-	 * 获得日期是一周的第几天. 已改为中国习惯，1 是Monday，而不是Sundays.
+	 * 获得日期是一周的第几天. 已改为中国习惯，1 是Monday，而不是Sunday.
 	 */
 	public static int getDayOfWeek(@NotNull final Date date) {
 		int result = getWithMondayFirst(date, Calendar.DAY_OF_WEEK);

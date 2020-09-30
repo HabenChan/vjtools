@@ -142,7 +142,7 @@ public class Client {
 		if (index <= 0) {
 			throw new RuntimeException("Unable to parse: " + userpass);
 		}
-		return new String[] { userpass.substring(0, index), userpass.substring(index + 1) };
+		return new String[]{userpass.substring(0, index), userpass.substring(index + 1)};
 	}
 
 	/**
@@ -152,34 +152,38 @@ public class Client {
 	 */
 	protected static Map formatCredentials(final String login, final String password) {
 		Map env = null;
-		String[] creds = new String[] { login, password };
+		String[] creds = new String[]{login, password};
 		env = new HashMap(1);
 		env.put(JMXConnector.CREDENTIALS, creds);
 		return env;
 	}
 
+	/**
+	 * 扩展支持以pid or host-port两种方式接入
+	 */
 	public static JMXConnector connect(final String hostportOrPid, final String login, final String password)
 			throws IOException {
-		if (hostportOrPid.contains(":")) {// ./vjmxcli.sh - 127.0.0.1:8060 vip.jmx:type=vGCutil
+		// ./vjmxcli.sh - 127.0.0.1:8060 gcutil
+		if (hostportOrPid.contains(":")) {
 			JMXServiceURL rmiurl = new JMXServiceURL(
 					"service:jmx:rmi://" + hostportOrPid + "/jndi/rmi://" + hostportOrPid + "/jmxrmi");
 			return JMXConnectorFactory.connect(rmiurl, formatCredentials(login, password));
-
-		} else {// ./vjmxcli.sh - 112222 vip.jmx:type=vGCutil
-			// Make up the jmx rmi URL and get a connector.
-			String address = getConnectorAddress(hostportOrPid);
-			JMXServiceURL rmiurl = new JMXServiceURL(address);
-			return JMXConnectorFactory.connect(rmiurl);
+		} else {
+			// ./vjmxcli.sh - 112222 gcutil
+			String localAddress = getLocalConnectorAddress(hostportOrPid);
+			JMXServiceURL localRmiurl = new JMXServiceURL(localAddress);
+			return JMXConnectorFactory.connect(localRmiurl);
 		}
 	}
 
 	/**
-	 * VirtualMachine保证JMX Agent已启动, 并向JMXClient提供连接地址地址样例：service:jmx:rmi://127.0.0.1/stub/rO0ABXN9AAAAAQAl...
+	 * VirtualMachine保证JMX Agent已启动, 并向JMXClient提供连接地址
+	 * 
+	 * 地址样例：service:jmx:rmi://127.0.0.1/stub/rO0ABXN9AAAAAQAl...
 	 */
-	public static String getConnectorAddress(String pid) throws IOException {// NOSONAR
+	public static String getLocalConnectorAddress(String pid) throws IOException {// NOSONAR
 		VirtualMachine vm = null;
 		// 1. attach vm
-
 		try {
 			vm = VirtualMachine.attach(pid);
 		} catch (AttachNotSupportedException x) {
@@ -189,7 +193,6 @@ public class Client {
 		}
 
 		try {
-
 			// 2. 检查smartAgent是否已启动
 			Properties agentProps = vm.getAgentProperties();
 			String address = (String) agentProps.get(LOCAL_CONNECTOR_ADDRESS_PROP);
@@ -199,38 +202,49 @@ public class Client {
 			}
 
 			// 3. 未启动，尝试启动
-			String home = vm.getSystemProperties().getProperty("java.home");
+			int version = getJavaMajorVersion(vm.getSystemProperties().getProperty("java.specification.version"));
+			if (version >= 8) {
+				vm.startLocalManagementAgent();
+				agentProps = vm.getAgentProperties();
+				address = (String) agentProps.get(LOCAL_CONNECTOR_ADDRESS_PROP);
+			} else {
+				// JDK8后有更直接的vm.startLocalManagementAgent()方法
+				String home = vm.getSystemProperties().getProperty("java.home");
+				// Normally in ${java.home}/jre/lib/management-agent.jar but might
+				// be in ${java.home}/lib in build environments.
+				String agentPath = home + File.separator + "jre" + File.separator + "lib" + File.separator
+						+ "management-agent.jar";
 
-			// Normally in ${java.home}/jre/lib/management-agent.jar but might
-			// be in ${java.home}/lib in build environments.
-
-			String agentPath = home + File.separator + "jre" + File.separator + "lib" + File.separator
-					+ "management-agent.jar";
-			File f = new File(agentPath);
-			if (!f.exists()) {
-				agentPath = home + File.separator + "lib" + File.separator + "management-agent.jar";
-				f = new File(agentPath);
+				File f = new File(agentPath);
 				if (!f.exists()) {
-					throw new IOException("Management agent not found");
+					agentPath = home + File.separator + "lib" + File.separator + "management-agent.jar";
+					f = new File(agentPath);
+					if (!f.exists()) {
+						throw new IOException("Management agent not found");
+					}
 				}
-			}
 
-			agentPath = f.getCanonicalPath();
-			try {
-				vm.loadAgent(agentPath, "com.sun.management.jmxremote");
-			} catch (AgentLoadException x) {
-				IOException ioe = new IOException(x.getMessage());
-				ioe.initCause(x);
-				throw ioe;
-			} catch (AgentInitializationException x) {
-				IOException ioe = new IOException(x.getMessage());
-				ioe.initCause(x);
-				throw ioe;
-			}
+				agentPath = f.getCanonicalPath();
+				try {
+					vm.loadAgent(agentPath, "com.sun.management.jmxremote");
+				} catch (AgentLoadException x) {
+					// 高版本 attach 低版本jdk 抛异常：com.sun.tools.attach.AgentLoadException: 0，实际上是成功的;
+					// 根因： HotSpotVirtualMachine.loadAgentLibrary 高版本jdk实现不一样了
+					if (!"0".equals(x.getMessage())) {
+						IOException ioe = new IOException(x.getMessage());
+						ioe.initCause(x);
+						throw ioe;
+					}
+				} catch (AgentInitializationException x) {
+					IOException ioe = new IOException(x.getMessage());
+					ioe.initCause(x);
+					throw ioe;
+				}
 
-			// 4. 再次获取connector address
-			agentProps = vm.getAgentProperties();
-			address = (String) agentProps.get(LOCAL_CONNECTOR_ADDRESS_PROP);
+				// 4. 再次获取connector address
+				agentProps = vm.getAgentProperties();
+				address = (String) agentProps.get(LOCAL_CONNECTOR_ADDRESS_PROP);
+			}
 
 			if (address == null) {
 				throw new IOException("Fails to find connector address");
@@ -267,8 +281,10 @@ public class Client {
 			}
 		}
 		String[] loginPassword = parseUserpass(userpass);
-		
+
+		// 模拟GC Util命令的扩展
 		if (V_GCUTIL_BEAN_NAME.equalsIgnoreCase(beanname)) {
+			// 支持配置interval 固定事件间隔连续输出
 			int interval = 0;
 			if (command != null && command.length > 0) {
 				try {
@@ -276,8 +292,9 @@ public class Client {
 				} catch (NumberFormatException e) {// NOSONAR
 				}
 			}
-			ExtraCommand vipCommand = new ExtraCommand();
-			vipCommand.execute(hostportOrPid, ((loginPassword == null) ? null : loginPassword[0]),
+
+			ExtraCommand extraCommand = new ExtraCommand();
+			extraCommand.execute(hostportOrPid, ((loginPassword == null) ? null : loginPassword[0]),
 					((loginPassword == null) ? null : loginPassword[1]), beanname, interval);
 			return;
 		}
@@ -304,7 +321,7 @@ public class Client {
 
 	public Object[] executeOneCmd(final String hostport, final String login, final String password,
 			final String beanname, final String command) throws Exception {
-		return execute(hostport, login, password, beanname, new String[] { command }, true);
+		return execute(hostport, login, password, beanname, new String[]{command}, true);
 	}
 
 	/**
@@ -348,7 +365,7 @@ public class Client {
 			final String[] command, final boolean oneBeanOnly) throws Exception {
 		Object[] result = null;
 		Set beans = mbsc.queryMBeans(objName, null);
-		if (beans.size() == 0) {
+		if (beans.isEmpty()) {
 			// No bean found. Check if we are to create a bean?
 			if (command.length == 1 && notEmpty(command[0]) && command[0].startsWith(CREATE_CMD_PREFIX)) {
 				String className = command[0].substring(CREATE_CMD_PREFIX.length());
@@ -379,7 +396,7 @@ public class Client {
 				}
 				buffer.append("\n");
 			}
-			result = new String[] { buffer.toString() };
+			result = new String[]{buffer.toString()};
 		}
 		return result;
 	}
@@ -397,7 +414,7 @@ public class Client {
 			throws Exception {
 		// If no command, then print out list of attributes and operations.
 		if (command == null || command.length <= 0) {
-			return new String[] { listOptions(mbsc, instance) };
+			return new String[]{listOptions(mbsc, instance)};
 		}
 
 		// Maybe multiple attributes/operations listed on one command line.
@@ -467,7 +484,7 @@ public class Client {
 			result = buffer;
 		} else if (result instanceof AttributeList) {
 			AttributeList list = (AttributeList) result;
-			if (list.size() <= 0) {
+			if (list.isEmpty()) {
 				result = null;
 			} else {
 				StringBuffer buffer = new StringBuffer("\n");
@@ -607,8 +624,8 @@ public class Client {
 		// Get first attribute of name 'cmd'. Assumption is no method
 		// overrides. Then, look at the attribute and use its type.
 		MBeanAttributeInfo info = (MBeanAttributeInfo) getFeatureInfo(infos, parse.getCmd());
-		java.lang.reflect.Constructor c = Class.forName(info.getType()).getConstructor(new Class[] { String.class });
-		Attribute a = new Attribute(parse.getCmd(), c.newInstance(new Object[] { parse.getArgs()[0] }));
+		java.lang.reflect.Constructor c = Class.forName(info.getType()).getConstructor(new Class[]{String.class});
+		Attribute a = new Attribute(parse.getCmd(), c.newInstance(new Object[]{parse.getArgs()[0]}));
 		mbsc.setAttribute(instance.getObjectName(), a);
 		return null;
 	}
@@ -637,8 +654,8 @@ public class Client {
 				for (int i = 0; i < paraminfosLength; i++) {
 					MBeanParameterInfo paraminfo = paraminfos[i];
 					java.lang.reflect.Constructor c = Class.forName(paraminfo.getType())
-							.getConstructor(new Class[] { String.class });
-					params[i] = c.newInstance(new Object[] { parse.getArgs()[i] });
+							.getConstructor(new Class[]{String.class});
+					params[i] = c.newInstance(new Object[]{parse.getArgs()[i]});
 					signature[i] = paraminfo.getType();
 				}
 				result = mbsc.invoke(instance.getObjectName(), parse.getCmd(), params, signature);
@@ -723,6 +740,7 @@ public class Client {
 			super();
 		}
 
+		@Override
 		public synchronized String format(LogRecord record) {
 			this.buffer.setLength(0);
 			this.date.setTime(record.getMillis());
@@ -749,6 +767,22 @@ public class Client {
 				}
 			}
 			return this.buffer.toString();
+		}
+	}
+
+	private static int getJavaMajorVersion(String javaSpecificationVersion) {
+		if (javaSpecificationVersion.startsWith("1.8")) {
+			return 8;
+		} else if (javaSpecificationVersion.startsWith("1.7")) {
+			return 7;
+		} else if (javaSpecificationVersion.startsWith("1.6")) {
+			return 6;
+		} else {
+			try {
+				return Integer.parseInt(javaSpecificationVersion);
+			} catch (NumberFormatException e) {
+				return 0;
+			}
 		}
 	}
 
